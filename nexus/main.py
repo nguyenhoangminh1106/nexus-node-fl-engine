@@ -2,6 +2,8 @@
 
 from contextlib import asynccontextmanager
 
+import logging
+
 import structlog
 from fastapi import FastAPI
 
@@ -12,13 +14,15 @@ from nexus.db.seed import seed_initial_org
 from nexus.db.session import async_session_factory, engine
 from nexus.storage import s3
 
+_LOG_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
+
 structlog.configure(
     processors=[
         structlog.stdlib.add_log_level,
         structlog.dev.ConsoleRenderer(),
     ],
     wrapper_class=structlog.make_filtering_bound_logger(
-        structlog.get_level_from_name(settings.log_level)
+        _LOG_LEVELS.get(settings.log_level.lower(), logging.INFO)
     ),
 )
 
