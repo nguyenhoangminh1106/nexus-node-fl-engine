@@ -8,10 +8,25 @@ This guide covers how to use the deployed FL Engine API. You need:
 
 > Don't have these? Ask your admin, or [deploy your own instance](#deploy-your-own).
 
-Throughout this guide:
-- `$SERVER_URL` = your deployed server (e.g. `https://your-app.up.railway.app`)
-- `$ORG_KEY` = your organization API key (starts with `nxo_`)
-- `$NODE_KEY` = your node API key (starts with `nxn_`)
+Throughout this guide we use three variables:
+
+### `$SERVER_URL`
+The deployed API endpoint. Ask your admin, or find it in Railway → API service → Settings → Networking → Public domain.
+```
+Example: https://nexus-node-fl-engine-production.up.railway.app
+```
+
+### `$ORG_KEY`
+Organization API key (starts with `nxo_`). Used for creating jobs and downloading trained models. Ask your admin — it's printed in the deploy logs on first startup. If you're the admin, check Railway → API service → Logs and look for `SEED ORGANIZATION CREATED`.
+
+### `$NODE_KEY`
+Compute node API key (starts with `nxn_`). Used for running the node agent (heartbeat, training, submitting weights). You get one by registering a node:
+```bash
+curl -X POST $SERVER_URL/api/v1/auth/register-node \
+  -H "Content-Type: application/json" \
+  -d '{"name": "your-name"}'
+```
+The key is shown only once in the response — save it immediately.
 
 ---
 
