@@ -2,17 +2,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system deps for psycopg/asyncpg
+# Install system deps for asyncpg
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy everything needed for install
 COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir .
-
 COPY nexus/ nexus/
 COPY alembic/ alembic/
 COPY alembic.ini .
+
+RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 
