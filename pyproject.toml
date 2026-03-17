@@ -22,7 +22,6 @@ dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "structlog>=24.1.0",
-    "passlib[bcrypt]>=1.7.4",
 ]
 
 [project.optional-dependencies]

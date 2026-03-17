@@ -4,10 +4,10 @@ import secrets
 import uuid
 
 from fastapi import APIRouter, Depends
-from passlib.hash import bcrypt
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.api.deps import hash_api_key
 from nexus.db.models import Node, Organization
 from nexus.db.session import get_db
 
@@ -51,7 +51,7 @@ async def register_org(body: RegisterOrgRequest, db: AsyncSession = Depends(get_
     api_key = f"nxo_{secrets.token_urlsafe(32)}"
     org = Organization(
         name=body.name,
-        api_key_hash=bcrypt.hash(api_key),
+        api_key_hash=hash_api_key(api_key),
     )
     db.add(org)
     await db.commit()
@@ -69,7 +69,7 @@ async def register_node(body: RegisterNodeRequest, db: AsyncSession = Depends(ge
     api_key = f"nxn_{secrets.token_urlsafe(32)}"
     node = Node(
         name=body.name,
-        api_key_hash=bcrypt.hash(api_key),
+        api_key_hash=hash_api_key(api_key),
         region=body.region,
         hardware_info=body.hardware_info,
     )

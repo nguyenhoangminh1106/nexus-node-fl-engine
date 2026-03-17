@@ -2,14 +2,13 @@
 
 import secrets
 
-from passlib.hash import bcrypt
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nexus.api.deps import hash_api_key
 from nexus.config import settings
 from nexus.db.models import Organization
-
-import structlog
 
 logger = structlog.get_logger()
 
@@ -23,7 +22,7 @@ async def seed_initial_org(db: AsyncSession) -> None:
     api_key = f"nxo_{secrets.token_urlsafe(32)}"
     org = Organization(
         name=settings.seed_org_name,
-        api_key_hash=bcrypt.hash(api_key),
+        api_key_hash=hash_api_key(api_key),
     )
     db.add(org)
     await db.commit()
