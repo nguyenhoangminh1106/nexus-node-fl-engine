@@ -15,16 +15,20 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Only add if it doesn't already exist (fresh DBs get it from baseline).
     conn = op.get_bind()
     columns = [c["name"] for c in sa.inspect(conn).get_columns("nodes")]
     if "device_type" not in columns:
-        devicetype_enum = sa.Enum("desktop", "mobile", name="devicetype")
-        devicetype_enum.create(conn, checkfirst=True)
-        op.add_column(
-            "nodes",
-            sa.Column("device_type", devicetype_enum, server_default="desktop"),
-        )
+        # Create the enum type if it doesn't exist, then add the column
+        # using raw SQL to avoid server_default enum-casting issues.
+        conn.execute(sa.text(
+            "DO $$ BEGIN "
+            "  CREATE TYPE devicetype AS ENUM ('desktop', 'mobile'); "
+            "EXCEPTION WHEN duplicate_object THEN NULL; "
+            "END $$"
+        ))
+        conn.execute(sa.text(
+            "ALTER TABLE nodes ADD COLUMN device_type devicetype DEFAULT 'desktop'::devicetype"
+        ))
 
 
 def downgrade() -> None:
