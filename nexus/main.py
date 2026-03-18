@@ -7,7 +7,7 @@ import logging
 import structlog
 from fastapi import FastAPI
 
-from nexus.api import auth, health, inference, jobs, nodes
+from nexus.api import auth, health, inference, jobs, mobile, nodes
 from nexus.config import settings
 from nexus.db.models import Base
 from nexus.db.seed import seed_initial_org
@@ -70,6 +70,7 @@ app.include_router(auth.router, prefix="/api/v1")
 app.include_router(jobs.router, prefix="/api/v1")
 app.include_router(nodes.router, prefix="/api/v1")
 app.include_router(inference.router, prefix="/api/v1")
+app.include_router(mobile.router, prefix="/api/v1")
 
 
 @app.get("/")

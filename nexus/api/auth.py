@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.deps import hash_api_key
-from nexus.db.models import Node, Organization
+from nexus.db.models import DeviceType, Node, Organization
 from nexus.db.session import get_db
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -29,6 +29,7 @@ class RegisterOrgResponse(BaseModel):
 
 class RegisterNodeRequest(BaseModel):
     name: str
+    device_type: str = "desktop"  # "desktop" or "mobile"
     region: str | None = None
     hardware_info: dict | None = None
 
@@ -67,9 +68,11 @@ async def register_node(body: RegisterNodeRequest, db: AsyncSession = Depends(ge
     weight submission).
     """
     api_key = f"nxn_{secrets.token_urlsafe(32)}"
+    device = DeviceType(body.device_type) if body.device_type in DeviceType.__members__ else DeviceType.DESKTOP
     node = Node(
         name=body.name,
         api_key_hash=hash_api_key(api_key),
+        device_type=device,
         region=body.region,
         hardware_info=body.hardware_info,
     )

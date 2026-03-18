@@ -47,6 +47,11 @@ class NodeStatus(str, enum.Enum):
     TRAINING = "training"
 
 
+class DeviceType(str, enum.Enum):
+    DESKTOP = "desktop"
+    MOBILE = "mobile"
+
+
 # ── Organizations ────────────────────────────────────────────────────────────
 
 
@@ -121,6 +126,7 @@ class Node(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     api_key_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[NodeStatus] = mapped_column(Enum(NodeStatus), default=NodeStatus.OFFLINE)
+    device_type: Mapped[DeviceType] = mapped_column(Enum(DeviceType), default=DeviceType.DESKTOP)
     region: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Hardware reported by node

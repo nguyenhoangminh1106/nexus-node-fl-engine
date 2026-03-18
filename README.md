@@ -57,13 +57,15 @@ nexus-node-fl-engine/
 │   │   ├── jobs.py             # CRUD training jobs
 │   │   ├── nodes.py            # Heartbeat, task poll, weight submit
 │   │   ├── inference.py        # Checkpoint download
+│   │   ├── mobile.py           # Mobile mining (checkin, ONNX download)
 │   │   ├── health.py           # /health, /ready
 │   │   └── deps.py             # Auth dependencies
 │   ├── core/                   # Business logic
 │   │   ├── fedavg.py           # Weighted FedAvg algorithm
 │   │   ├── orchestrator.py     # Round lifecycle & aggregation
 │   │   ├── model_registry.py   # Pluggable model definitions
-│   │   └── serialization.py    # State dict encode/decode
+│   │   ├── serialization.py    # State dict encode/decode
+│   │   └── conversion.py       # PyTorch → ONNX conversion
 │   ├── models/                 # ML model definitions
 │   │   ├── base.py             # Abstract model interface
 │   │   └── plantnet.py         # MobileNetV2 (original model)
@@ -118,9 +120,15 @@ Open `http://localhost:8000/docs` for the interactive Swagger UI.
 ### 3. Register a compute node
 
 ```bash
+# Desktop node
 curl -X POST http://localhost:8000/api/v1/auth/register-node \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-gpu-node", "region": "vietnam"}'
+  -d '{"name": "my-gpu-node", "device_type": "desktop", "region": "vietnam"}'
+
+# Mobile node
+curl -X POST http://localhost:8000/api/v1/auth/register-node \
+  -H "Content-Type: application/json" \
+  -d '{"name": "phone-1", "device_type": "mobile", "region": "vietnam"}'
 ```
 
 Save the returned `api_key` (starts with `nxn_`).
@@ -198,14 +206,22 @@ pytest tests/ -v
 | GET | `/api/v1/jobs/{id}` | Job detail + rounds |
 | DELETE | `/api/v1/jobs/{id}` | Cancel job |
 
-### Nodes (node API key required via `X-API-Key` header)
+### Nodes — Desktop (node API key required via `X-API-Key` header)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/v1/nodes/heartbeat` | Report health |
 | GET | `/api/v1/nodes/task` | Poll for training task |
-| GET | `/api/v1/nodes/task/{job_id}/model` | Download global model |
+| GET | `/api/v1/nodes/task/{job_id}/model` | Download global model (PyTorch base64) |
 | POST | `/api/v1/nodes/task/{job_id}/submit` | Submit trained weights |
 | GET | `/api/v1/nodes/stats` | Node reputation & stats |
+
+### Mobile (node API key required via `X-API-Key` header)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/mobile/checkin` | Report device conditions, get task if eligible |
+| GET | `/api/v1/mobile/model/{job_id}/onnx` | Download model in ONNX format |
+
+Mobile nodes submit weights via the same `POST /api/v1/nodes/task/{job_id}/submit` endpoint as desktop.
 
 ### Inference (org API key required)
 | Method | Endpoint | Description |
@@ -223,17 +239,27 @@ pytest tests/ -v
 
 ```
 Round N:
-  1. Orchestrator creates Round record (status: WAITING)
-  2. Nodes poll GET /nodes/task → receive task assignment
-  3. Nodes download model GET /nodes/task/{job}/model
-  4. Nodes train locally (no network traffic)
-  5. Nodes submit weights POST /nodes/task/{job}/submit
-  6. When all assigned nodes submit:
-     a. Orchestrator loads all weights from S3
-     b. Runs weighted FedAvg: global[k] = Σ(nᵢ/N) * wᵢ[k]
-     c. Saves aggregated checkpoint to S3
-     d. Advances to Round N+1
-  7. Job completes when all rounds are done
+  Desktop nodes:
+    1. Poll GET /nodes/task → receive task
+    2. Download model GET /nodes/task/{job}/model → PyTorch base64
+    3. Train locally with PyTorch
+    4. Submit weights POST /nodes/task/{job}/submit
+
+  Mobile nodes:
+    1. Checkin POST /mobile/checkin → get task (checks battery/wifi/charging)
+    2. Download model GET /mobile/model/{job}/onnx → ONNX binary
+    3. Convert ONNX → TFLite (Android) or Core ML (iOS) on-device
+    4. Train locally with on-device ML framework
+    5. Convert weights back to PyTorch format
+    6. Submit weights POST /nodes/task/{job}/submit (same as desktop)
+
+  Server (automatic):
+    - When all assigned nodes submit:
+      a. Load all weights from S3
+      b. Run weighted FedAvg: global[k] = Σ(nᵢ/N) * wᵢ[k]
+      c. Save aggregated checkpoint to S3
+      d. Advance to Round N+1
+    - Job completes when all rounds are done
 ```
 
 ## Adding a New Model
@@ -275,7 +301,7 @@ register("mymodel", MyModelDef())
 | `organizations` | B2B tenants with hashed API keys |
 | `jobs` | Training job config (model, rounds, status) |
 | `rounds` | Per-round state tracking |
-| `nodes` | Compute nodes with hardware info & trust scores |
+| `nodes` | Compute nodes with device type (desktop/mobile), hardware info & trust scores |
 | `node_assignments` | Which nodes are assigned to which jobs |
 | `submissions` | Weight submissions per round per node |
 | `checkpoints` | Saved model checkpoints (S3 paths) |
@@ -294,7 +320,8 @@ In development, tables are auto-created on startup via `Base.metadata.create_all
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | `postgresql+asyncpg://nexus:nexus@localhost:5432/nexus` | Postgres connection |
-| `S3_ENDPOINT_URL` | `http://localhost:9000` | S3/MinIO endpoint |
+| `S3_ENDPOINT_URL` | `http://localhost:9000` | S3/MinIO internal endpoint |
+| `S3_PUBLIC_URL` | (empty) | Public S3 URL for presigned downloads. If empty, files are proxied through the API |
 | `S3_ACCESS_KEY` | `minioadmin` | S3 access key |
 | `S3_SECRET_KEY` | `minioadmin` | S3 secret key |
 | `S3_BUCKET` | `nexus` | Bucket name |

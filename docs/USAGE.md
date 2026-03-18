@@ -149,6 +149,58 @@ The node will:
 
 ---
 
+## 4b. Run a Mobile Node
+
+Mobile nodes (phones/tablets) use a different flow optimized for battery and bandwidth.
+
+### Mobile check-in
+
+The app reports device conditions. Server only assigns work if conditions are met:
+
+```bash
+curl -X POST $SERVER_URL/api/v1/mobile/checkin \
+  -H "X-API-Key: $NODE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"battery_pct": 85, "is_charging": true, "is_wifi": true}'
+```
+
+Server rejects if: battery < 30%, not on WiFi, or not charging.
+
+Response when a task is available:
+```json
+{
+  "has_task": true,
+  "job_id": "...",
+  "job_name": "plant-disease-v1",
+  "round_num": 0,
+  "model_type": "plantnet",
+  "num_classes": 38
+}
+```
+
+### Download model in ONNX format
+
+Mobile apps need ONNX (not PyTorch) to convert to TFLite (Android) or Core ML (iOS):
+
+```bash
+curl -H "X-API-Key: $NODE_KEY" \
+  -o model.onnx \
+  $SERVER_URL/api/v1/mobile/model/JOB_UUID/onnx
+```
+
+The ONNX file is cached server-side — conversion only happens once per round.
+
+### Mobile training flow
+
+1. **Checkin** → `POST /mobile/checkin` (get task + condition check)
+2. **Download** → `GET /mobile/model/{job}/onnx` (ONNX binary)
+3. **Convert on-device** → ONNX to TFLite (Android) or Core ML (iOS)
+4. **Train locally** → using on-device ML framework
+5. **Convert weights back** → to PyTorch state_dict format
+6. **Submit** → `POST /nodes/task/{job}/submit` (same endpoint as desktop)
+
+---
+
 ## 5. Monitor Progress
 
 ### Job status
@@ -197,11 +249,13 @@ curl -H "X-API-Key: $ORG_KEY" \
 ### Download latest checkpoint
 
 ```bash
+# Download directly to file
 curl -H "X-API-Key: $ORG_KEY" \
+  -o checkpoint.pth \
   "$SERVER_URL/api/v1/inference/checkpoints/JOB_UUID/download"
 ```
 
-Returns a presigned URL (valid 1 hour):
+If `S3_PUBLIC_URL` is configured on the server, the response is a JSON with a presigned URL instead:
 ```json
 {
   "download_url": "https://...",
@@ -214,6 +268,7 @@ Returns a presigned URL (valid 1 hour):
 
 ```bash
 curl -H "X-API-Key: $ORG_KEY" \
+  -o checkpoint_r5.pth \
   "$SERVER_URL/api/v1/inference/checkpoints/JOB_UUID/download?round_num=5"
 ```
 
@@ -226,7 +281,7 @@ All authenticated endpoints use the `X-API-Key` header.
 | Key prefix | Who uses it | Endpoints |
 |------------|-------------|-----------|
 | `nxo_` | Organizations (admin, T3 app) | `/api/v1/jobs/*`, `/api/v1/inference/*` |
-| `nxn_` | Compute nodes | `/api/v1/nodes/*` |
+| `nxn_` | Compute nodes (desktop & mobile) | `/api/v1/nodes/*`, `/api/v1/mobile/*` |
 
 Public endpoints (no key needed):
 - `GET /health`
@@ -253,13 +308,20 @@ GET    /api/v1/jobs/{id}           → Job detail + rounds
 DELETE /api/v1/jobs/{id}           → Cancel job
 ```
 
-### Nodes
+### Nodes (desktop)
 ```
 POST /api/v1/nodes/heartbeat          → Report health
 GET  /api/v1/nodes/task               → Poll for training task
-GET  /api/v1/nodes/task/{job}/model   → Download global model
+GET  /api/v1/nodes/task/{job}/model   → Download global model (PyTorch base64)
 POST /api/v1/nodes/task/{job}/submit  → Submit trained weights
 GET  /api/v1/nodes/stats              → Node stats & reputation
+```
+
+### Mobile
+```
+POST /api/v1/mobile/checkin            → Report conditions, get task if eligible
+GET  /api/v1/mobile/model/{job}/onnx   → Download model (ONNX binary)
+POST /api/v1/nodes/task/{job}/submit   → Submit weights (same as desktop)
 ```
 
 ### Inference

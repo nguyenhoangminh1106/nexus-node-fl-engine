@@ -18,6 +18,7 @@ from nexus.db.models import (
     NodeStatus,
     Round,
     RoundStatus,
+    Submission,
 )
 from nexus.db.session import get_db
 
@@ -56,6 +57,7 @@ class SubmitWeightsRequest(BaseModel):
 class NodeStatsResponse(BaseModel):
     node_id: uuid.UUID
     name: str
+    device_type: str
     trust_score: float
     rounds_completed: int
     rounds_failed: int
@@ -118,8 +120,6 @@ async def poll_task(
             continue
 
         # Check if node already submitted for this round
-        from nexus.db.models import Submission
-
         result = await db.execute(
             select(Submission).where(
                 Submission.round_id == current_round.id,
@@ -209,6 +209,7 @@ async def get_stats(
     return NodeStatsResponse(
         node_id=node.id,
         name=node.name,
+        device_type=node.device_type.value,
         trust_score=node.trust_score,
         rounds_completed=node.rounds_completed,
         rounds_failed=node.rounds_failed,

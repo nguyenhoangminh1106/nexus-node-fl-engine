@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     # S3 / MinIO
     s3_endpoint_url: str = "http://localhost:9000"
+    s3_public_url: str = ""  # Public URL for presigned downloads (e.g. https://minio.example.com). If empty, downloads are proxied through the API.
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
     s3_bucket: str = "nexus"

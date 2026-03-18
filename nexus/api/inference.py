@@ -1,25 +1,20 @@
-"""Inference endpoint — run predictions using a trained checkpoint."""
+"""Inference endpoint — list and download trained checkpoints."""
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.deps import get_current_org
-from nexus.core import model_registry
-from nexus.core.serialization import bytes_to_state_dict
+from nexus.config import settings
 from nexus.db.models import Checkpoint, Job, Organization
 from nexus.db.session import get_db
 from nexus.storage import s3
 
 router = APIRouter(prefix="/inference", tags=["inference"])
-
-
-class InferenceRequest(BaseModel):
-    job_id: uuid.UUID
-    round_num: int | None = None  # None = latest checkpoint
 
 
 class CheckpointResponse(BaseModel):
@@ -39,7 +34,6 @@ async def list_checkpoints(
     db: AsyncSession = Depends(get_db),
 ):
     """List all saved checkpoints for a job."""
-    # Verify ownership
     job = await db.get(Job, job_id)
     if job is None or job.org_id != org.id:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -69,7 +63,13 @@ async def download_checkpoint(
     org: Organization = Depends(get_current_org),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a presigned URL to download a checkpoint.
+    """Download a checkpoint.
+
+    If S3_PUBLIC_URL is configured: returns a presigned URL (client downloads
+    directly from S3 — efficient for large models).
+
+    If S3_PUBLIC_URL is not set: streams the file through the API server
+    (works everywhere but uses server bandwidth).
 
     If round_num is omitted, returns the latest checkpoint.
     """
@@ -88,9 +88,26 @@ async def download_checkpoint(
     if checkpoint is None:
         raise HTTPException(status_code=404, detail="Checkpoint not found")
 
-    url = s3.generate_presigned_url(checkpoint.path, expires_in=3600)
-    return {
-        "download_url": url,
-        "round_num": checkpoint.round_num,
-        "expires_in": 3600,
-    }
+    # If public S3 URL is configured, return presigned URL
+    if settings.s3_public_url:
+        url = s3.generate_presigned_url(checkpoint.path, expires_in=3600)
+        return {
+            "download_url": url,
+            "round_num": checkpoint.round_num,
+            "expires_in": 3600,
+        }
+
+    # Otherwise, stream the file through the API
+    def _stream():
+        data = s3.download_bytes(checkpoint.path)
+        yield data
+
+    return StreamingResponse(
+        _stream(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename=checkpoint_round_{checkpoint.round_num}.pth",
+            "X-Round-Num": str(checkpoint.round_num),
+            "X-Job-Id": str(job_id),
+        },
+    )
