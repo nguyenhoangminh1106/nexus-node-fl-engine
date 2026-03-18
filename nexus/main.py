@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from nexus.api import auth, health, inference, jobs, mobile, nodes
 from nexus.config import settings
-from nexus.db.models import Base
+from nexus.db.migrate import run_migrations
 from nexus.db.seed import seed_initial_org
 from nexus.db.session import async_session_factory, engine
 from nexus.storage import s3
@@ -34,9 +34,8 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("starting", host=settings.host, port=settings.port)
 
-    # Create tables (in production, use Alembic migrations instead)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Apply database migrations
+    run_migrations()
     logger.info("database_ready")
 
     # Ensure S3 bucket exists
