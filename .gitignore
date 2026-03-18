@@ -7,6 +7,7 @@ data/
 
 # Inference output
 test/
+results/
 
 # Python
 __pycache__/
@@ -31,3 +32,10 @@ Thumbs.db
 
 # VS Code
 .vscode/
+
+# Environment
+.env
+
+# Docker volumes
+pgdata/
+miniodata/

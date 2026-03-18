@@ -1,244 +1,361 @@
-# Federated Learning — Plant Disease Detection
-A federated learning setup across **3 PCs** using **weighted FedAvg** to train a
-**MobileNetV2** model on the **PlantVillage** dataset (38 plant disease classes).
-![Pipeline](pipeline_federated_training.png)
+# Nexus Node FL Engine
 
-A federated learning setup across **3 PCs** using **weighted FedAvg** to train a
-**MobileNetV2** model on the **PlantVillage** dataset (38 plant disease classes).
+Federated Learning orchestration service for distributed AI training. Built as the compute backbone for the Nexus Node platform.
 
----
+## What This Does
+
+A REST API server that coordinates federated learning across distributed compute nodes:
+
+- **Organizations** create training jobs via API (or through the T3 web app)
+- **Compute nodes** register, poll for tasks, train locally, and submit weights
+- **Server** aggregates weights using Weighted FedAvg after each round
+- **Checkpoints** are saved to S3-compatible storage after every round
+
+The core FL algorithm (async weighted FedAvg with MobileNetV2 backbone freezing for CPU nodes) is preserved from the original research implementation.
 
 ## Architecture
 
-| File | Where it runs | Role |
-|---|---|---|
-| `model.py`  | All 3 PCs   | MobileNetV2 fine-tuned for 38 plant disease classes |
-| `server.py` | PC 1        | Trains locally + aggregates via weighted FedAvg |
-| `client.py` | PC 2 & PC 3 | Trains locally, submits weights once per round |
-| `infer.py`  | Any PC      | Runs inference on the saved checkpoint |
-
-### How a round works
-1. All nodes (server + clients) **fetch the current global model** from the server.  
-   `GET /get_model?wait_for_round=N` — blocks until FedAvg for round N-1 is complete.
-2. Each node **trains locally** on its own data partition (no network traffic during training).
-3. Each node **submits its trained weights** to the server.  
-   `POST /submit_weights` — returns immediately; the caller is never blocked.
-4. Once **all nodes** (server + all clients) have submitted, the server runs  
-   **weighted FedAvg** — weights are averaged proportionally to each node's dataset size.
-5. Round counter increments → everyone fetches the new model → repeat.
-
-### Key design decisions
-
-| Property | Detail |
-|---|---|
-| **No per-batch synchronisation** | Unlike EdgeFed, clients never wait for the server mid-epoch. The only sync point is one FedAvg per round. |
-| **Server is a full participant** | Server trains on its own data partition AND runs aggregation — computation is truly shared. |
-| **Auto freeze backbone on CPU** | CPU-only clients automatically freeze the MobileNetV2 backbone and only train the last 3 InvertedResidual blocks + classifier (~0.3 M params instead of 3.4 M — ~10× faster). |
-| **FedAvg trigger** | FedAvg fires exactly when the last expected submission arrives (thread-safe via `threading.Condition`). |
-| **Data cap per client** | Each client trains on at most `--max_samples` images (default 200). Use `--max_samples 0` to disable the cap. |
-
----
-
-## Dataset — PlantVillage
-
-38 classes covering healthy and diseased leaves across multiple plant species.
-
-> **All 3 PCs need the dataset.** The server trains on its own partition too.
-
-### Download (all PCs)
-
-**Way 1 — Manual download (no account needed for browser download)**
-
-1. Go to [kaggle.com/datasets/abdallahalidev/plantvillage-dataset](https://www.kaggle.com/datasets/abdallahalidev/plantvillage-dataset)
-2. Click **Download** and save the zip file.
-3. Extract it:
-   ```cmd
-   tar -xf plantvillage-dataset.zip
-   ```
-
-**Way 2 — Kaggle CLI**
-
-> Requires a Kaggle API key: go to kaggle.com → Settings → API → **Create New Token**.  
-> Place `kaggle.json` in `C:\Users\<YourUsername>\.kaggle\kaggle.json`.
-
-```cmd
-pip install kaggle
-python -m kaggle datasets download -d abdallahalidev/plantvillage-dataset
-tar -xf plantvillage-dataset.zip
+```
+┌─────────────────────────────────────────────────────┐
+│  FastAPI Server                                      │
+│                                                      │
+│  /api/v1/auth/*      → register orgs & nodes        │
+│  /api/v1/jobs/*      → create & manage FL jobs       │
+│  /api/v1/nodes/*     → heartbeat, poll, submit       │
+│  /api/v1/inference/* → download trained models       │
+│  /health, /ready     → health checks                 │
+│                                                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
+│  │Orchestrator│ │ FedAvg   │  │ Model Registry   │  │
+│  │(rounds,   │ │(weighted │  │(plantnet, ...    │  │
+│  │ routing)  │ │ avg)     │  │ extensible)      │  │
+│  └──────────┘  └──────────┘  └──────────────────┘  │
+│         │              │                             │
+│  ┌──────┴──────────────┴─────┐                      │
+│  │  PostgreSQL    S3/MinIO   │                      │
+│  │  (jobs, nodes, (weights,  │                      │
+│  │   rounds)      checkpoints)│                     │
+│  └───────────────────────────┘                      │
+└─────────────────────────────────────────────────────┘
+        ▲              ▲              ▲
+        │              │              │
+   ┌────┴───┐    ┌────┴───┐    ┌────┴───┐
+   │ Node 1 │    │ Node 2 │    │ Node N │
+   │(client)│    │(client)│    │(client)│
+   └────────┘    └────────┘    └────────┘
 ```
 
-Either way, extract so the folder structure is:
+## Project Structure
+
 ```
-plantvillage/
-    Apple___Apple_scab/
-    Apple___Black_rot/
-    Apple___Cedar_apple_rust/
-    Apple___healthy/
-    ...  (38 folders total)
+nexus-node-fl-engine/
+├── nexus/                      # Server package
+│   ├── main.py                 # FastAPI entrypoint
+│   ├── config.py               # Pydantic settings (env-based)
+│   ├── api/                    # REST endpoints
+│   │   ├── auth.py             # Register orgs & nodes
+│   │   ├── jobs.py             # CRUD training jobs
+│   │   ├── nodes.py            # Heartbeat, task poll, weight submit
+│   │   ├── inference.py        # Checkpoint download
+│   │   ├── mobile.py           # Mobile mining (checkin, ONNX download)
+│   │   ├── health.py           # /health, /ready
+│   │   └── deps.py             # Auth dependencies
+│   ├── core/                   # Business logic
+│   │   ├── fedavg.py           # Weighted FedAvg algorithm
+│   │   ├── orchestrator.py     # Round lifecycle & aggregation
+│   │   ├── model_registry.py   # Pluggable model definitions
+│   │   ├── serialization.py    # State dict encode/decode
+│   │   └── conversion.py       # PyTorch → ONNX conversion
+│   ├── models/                 # ML model definitions
+│   │   ├── base.py             # Abstract model interface
+│   │   └── plantnet.py         # MobileNetV2 (original model)
+│   ├── db/                     # Database layer
+│   │   ├── models.py           # SQLAlchemy ORM models
+│   │   ├── session.py          # Async engine & session
+│   │   └── seed.py             # Initial org creation
+│   └── storage/
+│       └── s3.py               # S3/MinIO operations
+├── client/                     # Node agent (runs on compute nodes)
+│   ├── node.py                 # Long-running training agent
+│   └── config.py               # Node configuration
+├── tests/                      # Unit tests
+├── alembic/                    # DB migrations
+├── docker-compose.yml          # Full stack (API + Postgres + MinIO)
+├── Dockerfile
+└── pyproject.toml
 ```
 
-Copy the `plantvillage/` folder to **each PC**.
+## Quick Start
 
----
-
-## Setup (all 3 PCs)
+### 1. Start the stack
 
 ```bash
-pip install -r requirements.txt
+cp .env.example .env
+docker compose up -d
 ```
 
-Copy these files to **each PC**:
-- `model.py`
-- `requirements.txt`
-- `server.py`  (PC 1 only)
-- `client.py`  (PC 2 & PC 3 only)
-- `infer.py`   (any PC you want to run inference from)
+This starts:
+- **API server** on `http://localhost:8000`
+- **PostgreSQL** on `localhost:5432`
+- **MinIO** on `http://localhost:9000` (console: `http://localhost:9001`)
 
----
-
-## Running
-
-### PC 1 — Server
+The API server auto-creates tables and prints a **seed organization API key** on first startup. Check the logs:
 
 ```bash
-python server.py --clients 2 --rounds 10 --data_dir ./plantvillage
+docker compose logs api
 ```
 
-> Run as **Administrator** so the firewall rule for port 5000 is created automatically.  
-> Without `--data_dir` the server runs as a **pure aggregator** (no local training).
+Look for:
+```
+  SEED ORGANIZATION CREATED
+  Name    : nexus-admin
+  API Key : nxo_xxxxxxxxxxxxx
+  (save this — it won't be shown again)
+```
 
-### PC 2 — Client 1
+### 2. Explore the API
+
+Open `http://localhost:8000/docs` for the interactive Swagger UI.
+
+### 3. Register a compute node
 
 ```bash
-python client.py --client_id 1 --server http://<PC1_IP>:5000 --data_dir ./plantvillage --max_samples 200
+# Desktop node
+curl -X POST http://localhost:8000/api/v1/auth/register-node \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-gpu-node", "device_type": "desktop", "region": "vietnam"}'
+
+# Mobile node
+curl -X POST http://localhost:8000/api/v1/auth/register-node \
+  -H "Content-Type: application/json" \
+  -d '{"name": "phone-1", "device_type": "mobile", "region": "vietnam"}'
 ```
 
-### PC 3 — Client 2
+Save the returned `api_key` (starts with `nxn_`).
+
+### 4. Create a training job
 
 ```bash
-python client.py --client_id 2 --server http://<PC1_IP>:5000 --data_dir ./plantvillage --max_samples 200
+curl -X POST http://localhost:8000/api/v1/jobs \
+  -H "X-API-Key: nxo_YOUR_ORG_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "plant-disease-v1",
+    "model_type": "plantnet",
+    "num_classes": 38,
+    "total_rounds": 10,
+    "min_nodes": 2,
+    "node_ids": ["NODE_UUID_1", "NODE_UUID_2"]
+  }'
 ```
 
-> Replace `<PC1_IP>` with the actual IP of PC 1 (find it with `ipconfig`).  
-> `--freeze_backbone` is **enabled automatically** on CPU-only machines.
-> Each client uses at most **200 images** from its own partition by default.
+### 5. Start a compute node
 
----
+```bash
+python -m client.node \
+  --server http://localhost:8000 \
+  --api-key nxn_YOUR_NODE_KEY \
+  --data-dir ./plantvillage \
+  --epochs 2 \
+  --batch-size 32
+```
 
-## Optional flags
+The node will:
+1. Send heartbeats every 30s
+2. Poll for assigned tasks
+3. Download the global model
+4. Train locally
+5. Submit weights
+6. Wait for the next round
 
-### server.py
+## Local Development (without Docker)
+
+```bash
+# Create venv
+python -m venv .venv && source .venv/bin/activate
+
+# Install with dev deps
+pip install -e ".[dev]"
+
+# Start Postgres and MinIO (or use Docker for just these)
+docker compose up -d db minio
+
+# Copy and edit env
+cp .env.example .env
+
+# Run the server
+uvicorn nexus.main:app --reload --port 8000
+
+# Run tests
+pytest tests/ -v
+```
+
+## API Reference
+
+### Auth
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/auth/register-org` | Create org, get API key |
+| POST | `/api/v1/auth/register-node` | Register node, get API key |
+
+### Jobs (org API key required via `X-API-Key` header)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/jobs` | Create training job |
+| GET | `/api/v1/jobs` | List org's jobs |
+| GET | `/api/v1/jobs/{id}` | Job detail + rounds |
+| DELETE | `/api/v1/jobs/{id}` | Cancel job |
+
+### Nodes — Desktop (node API key required via `X-API-Key` header)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/nodes/heartbeat` | Report health |
+| GET | `/api/v1/nodes/task` | Poll for training task |
+| GET | `/api/v1/nodes/task/{job_id}/model` | Download global model (PyTorch base64) |
+| POST | `/api/v1/nodes/task/{job_id}/submit` | Submit trained weights |
+| GET | `/api/v1/nodes/stats` | Node reputation & stats |
+
+### Mobile (node API key required via `X-API-Key` header)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/mobile/checkin` | Report device conditions, get task if eligible |
+| GET | `/api/v1/mobile/model/{job_id}/onnx` | Download model in ONNX format |
+
+Mobile nodes submit weights via the same `POST /api/v1/nodes/task/{job_id}/submit` endpoint as desktop.
+
+### Inference (org API key required)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/inference/checkpoints/{job_id}` | List checkpoints |
+| GET | `/api/v1/inference/checkpoints/{job_id}/download` | Presigned download URL |
+
+### Health
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Liveness |
+| GET | `/ready` | Readiness (DB check) |
+
+## FL Training Flow
+
+```
+Round N:
+  Desktop nodes:
+    1. Poll GET /nodes/task → receive task
+    2. Download model GET /nodes/task/{job}/model → PyTorch base64
+    3. Train locally with PyTorch
+    4. Submit weights POST /nodes/task/{job}/submit
+
+  Mobile nodes:
+    1. Checkin POST /mobile/checkin → get task (checks battery/wifi/charging)
+    2. Download model GET /mobile/model/{job}/onnx → ONNX binary
+    3. Convert ONNX → TFLite (Android) or Core ML (iOS) on-device
+    4. Train locally with on-device ML framework
+    5. Convert weights back to PyTorch format
+    6. Submit weights POST /nodes/task/{job}/submit (same as desktop)
+
+  Server (automatic):
+    - When all assigned nodes submit:
+      a. Load all weights from S3
+      b. Run weighted FedAvg: global[k] = Σ(nᵢ/N) * wᵢ[k]
+      c. Save aggregated checkpoint to S3
+      d. Advance to Round N+1
+    - Job completes when all rounds are done
+```
+
+## Adding a New Model
+
+1. Create `nexus/models/mymodel.py` implementing `BaseModelDef`:
+
+```python
+from nexus.models.base import BaseModelDef
+
+class MyModelDef(BaseModelDef):
+    def build(self, num_classes, pretrained=True):
+        # Return an nn.Module
+        ...
+    def freeze_for_client(self, model):
+        # Freeze heavy layers for CPU nodes
+        ...
+    def unfreeze_all(self, model):
+        ...
+    def train_transform(self):
+        # Return torchvision.transforms.Compose
+        ...
+    def val_transform(self):
+        ...
+```
+
+2. Register it in `nexus/core/model_registry.py`:
+
+```python
+from nexus.models.mymodel import MyModelDef
+register("mymodel", MyModelDef())
+```
+
+3. Create jobs with `"model_type": "mymodel"`
+
+## Database Schema
+
+| Table | Purpose |
+|-------|---------|
+| `organizations` | B2B tenants with hashed API keys |
+| `jobs` | Training job config (model, rounds, status) |
+| `rounds` | Per-round state tracking |
+| `nodes` | Compute nodes with device type (desktop/mobile), hardware info & trust scores |
+| `node_assignments` | Which nodes are assigned to which jobs |
+| `submissions` | Weight submissions per round per node |
+| `checkpoints` | Saved model checkpoints (S3 paths) |
+
+For production, use Alembic migrations:
+
+```bash
+alembic revision --autogenerate -m "description"
+alembic upgrade head
+```
+
+In development, tables are auto-created on startup via `Base.metadata.create_all`.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | `postgresql+asyncpg://nexus:nexus@localhost:5432/nexus` | Postgres connection |
+| `S3_ENDPOINT_URL` | `http://localhost:9000` | S3/MinIO internal endpoint |
+| `S3_PUBLIC_URL` | (empty) | Public S3 URL for presigned downloads. If empty, files are proxied through the API |
+| `S3_ACCESS_KEY` | `minioadmin` | S3 access key |
+| `S3_SECRET_KEY` | `minioadmin` | S3 secret key |
+| `S3_BUCKET` | `nexus` | Bucket name |
+| `HOST` | `0.0.0.0` | Server bind host |
+| `PORT` | `8000` | Server bind port |
+| `LOG_LEVEL` | `info` | Logging level |
+| `SEED_ORG_NAME` | `nexus-admin` | Initial org name |
+
+## Node Agent Flags
+
+```
+python -m client.node --help
+```
 
 | Flag | Default | Description |
-|---|---|---|
-| `--clients`     | 2    | Number of remote clients to wait for per round |
-| `--rounds`      | 10   | Total FL rounds |
-| `--port`        | 5000 | Listening port |
-| `--lr`          | 0.001 | SGD learning rate for server local training |
-| `--epochs`      | 2    | Server local training epochs per round |
-| `--batch_size`  | 32   | Server training batch size |
-| `--data_dir`    | —    | Server data partition (ImageFolder layout). Omit for pure aggregator. |
-| `--num_classes` | 38   | Number of output classes |
+|------|---------|-------------|
+| `--server` | `http://localhost:8000` | Server URL |
+| `--api-key` | required | Node API key from registration |
+| `--data-dir` | required | Local dataset directory (ImageFolder layout) |
+| `--epochs` | 2 | Training epochs per round |
+| `--batch-size` | 32 | Training batch size |
+| `--lr` | 0.001 | SGD learning rate |
+| `--max-samples` | 200 | Max training samples (0 = all) |
+| `--freeze-backbone` | auto (on CPU) | Freeze backbone for fast CPU training |
+| `--poll-interval` | 5 | Seconds between task polls |
 
-### client.py
+## Original Research
 
-| Flag | Default | Description |
-|---|---|---|
-| `--client_id`       | required | Unique ID for this client (1-based, e.g. 1 or 2) |
-| `--server`          | `http://localhost:5000` | Server URL |
-| `--data_dir`        | required | Path to PlantVillage dataset folder |
-| `--rounds`          | 10    | Number of FL rounds |
-| `--epochs`          | 2     | Local training epochs per round |
-| `--lr`              | 0.001 | SGD learning rate |
-| `--batch_size`      | 32    | Training batch size |
-| `--max_samples`     | 200   | Maximum local training images to use from this client's partition. Use `0` for all images. |
-| `--num_clients`     | 2     | Total number of clients (for data partitioning) |
-| `--freeze_backbone` | auto  | Freeze backbone, train only last 3 blocks + classifier. Auto-enabled on CPU. |
-| `--evaluate`        | off   | Run validation accuracy after each round |
-| `--num_classes`     | 38    | Number of output classes |
+The core FL algorithm is based on async weighted FedAvg for plant disease detection using the PlantVillage dataset (38 classes). The original implementation is preserved in `nexus/models/plantnet.py` and `nexus/core/fedavg.py`.
 
----
+Key design decisions from the original:
+- **Server as participant**: server trains on its own data partition, not just aggregates
+- **Async training**: no per-batch synchronization, only per-round
+- **Backbone freezing**: MobileNetV2 features frozen on CPU nodes (~10x speedup, ~0.3M vs ~3.4M trainable params)
+- **Weighted FedAvg**: nodes with more samples have proportionally more influence
 
-## Output
-
-After all rounds complete, `global_model_final.pth` is saved on **PC 1** (the server).  
-Copy this file (along with `model.py`) to any machine to run inference.
-
----
-
-## Inference
-
-```bash
-# 10 random samples from the PlantVillage dataset
-python infer.py --data_dir ./plantvillage
-
-# 20 random samples — save annotated images (border + label) to ./results/
-python infer.py --data_dir ./plantvillage --samples 20 --save --out_dir results
-
-# One specific sample by dataset index
-python infer.py --data_dir ./plantvillage --index 42
-
-# Your own image file(s)
-python infer.py --image leaf.jpg
-python infer.py --image a.jpg b.jpg c.jpg
-
-# Your own images — save annotated copies to ./results/
-python infer.py --image leaf.jpg --save --out_dir results
-
-# Different checkpoint
-python infer.py --data_dir ./plantvillage --checkpoint my_model.pth
-```
-
-Output in dataset mode:
-
-```
-  Index    True Label                               Predicted                                Conf    OK
-  ---------------------------------------------------------------------------------------------------------
-  10423    Tomato___Late_blight                     Tomato___Late_blight                      94.3%     V
-  3187     Apple___Apple_scab                       Apple___Cedar_apple_rust                  61.0%     X
-  ...
-  Accuracy : 9/10 (90.0%)
-```
-
-When `--save` is used, each image is annotated and saved to `--out_dir`:
-
-- **Green border** + label bar — correct prediction  
-- **Red border** + label bar — wrong prediction  
-- **Blue border** + label bar — standalone `--image` file (no ground truth)
-
-The label bar shows the disease name and confidence, e.g. `Late_blight  94.3%`.
-
-Saved filenames encode the result:
-
-```
-3187_Apple___Apple_scab_pred-Apple___Cedar_apple_rust_WRONG_61pct.jpg
-```
-
-### infer.py flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--data_dir`    | — | PlantVillage folder — picks random test samples (mutually exclusive with `--image`) |
-| `--image`       | — | One or more image file paths (mutually exclusive with `--data_dir`) |
-| `--samples`     | 10 | Number of random samples when using `--data_dir` |
-| `--index`       | — | Predict a specific sample by dataset index instead of random |
-| `--save`        | off | Save annotated images (bounding box + label bar) to `--out_dir`. Works with both `--data_dir` and `--image`. |
-| `--out_dir`     | `test` | Folder to save annotated output images |
-| `--checkpoint`  | `global_model_final.pth` | Path to trained model checkpoint |
-| `--num_classes` | 38 | Number of output classes |
-
-## Firewall note (Windows)
-
-The server auto-creates a firewall rule when run as Administrator.
-To add it manually:
-
-```
-Windows Defender Firewall → Inbound Rules → New Rule → Port → TCP 5000 → Allow
-```
-
-Or via PowerShell (run as Administrator):
-
-```powershell
-New-NetFirewallRule -DisplayName "FL Server" -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow
-```
-```
+The original standalone scripts (`model.py`, `server.py`, `client.py`, `infer.py`, `evaluate.py`) are preserved in the repo root for reference but are superseded by the `nexus/` and `client/` packages.
