@@ -1,21 +1,31 @@
 """Run Alembic migrations programmatically at application startup."""
 
-import os
+import subprocess
+import sys
 from pathlib import Path
-
-from alembic import command
-from alembic.config import Config
 
 from nexus.config import settings
 
 
 def run_migrations() -> None:
-    """Apply all pending Alembic migrations."""
-    alembic_cfg = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    """Apply all pending Alembic migrations via subprocess.
 
-    # Override the DB URL with the app's configured value so the migration
-    # always targets the same database the application connects to.
+    We shell out instead of using alembic.command directly because the async
+    Alembic env calls asyncio.run(), which cannot be nested inside uvicorn's
+    already-running event loop.
+    """
+    alembic_ini = str(Path(__file__).resolve().parents[2] / "alembic.ini")
+
+    # Convert async URL to sync for Alembic CLI (asyncpg -> psycopg2-style).
     db_url = settings.async_database_url
-    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+    sync_url = db_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
-    command.upgrade(alembic_cfg, "head")
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", alembic_ini, "upgrade", "head"],
+        env={**__import__("os").environ, "DATABASE_URL": sync_url},
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Alembic migration failed:\n{result.stderr}")
