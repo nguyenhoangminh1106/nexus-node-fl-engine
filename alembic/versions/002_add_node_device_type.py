@@ -18,16 +18,14 @@ def upgrade() -> None:
     conn = op.get_bind()
     columns = [c["name"] for c in sa.inspect(conn).get_columns("nodes")]
     if "device_type" not in columns:
-        # Create the enum type if it doesn't exist, then add the column
-        # using raw SQL to avoid server_default enum-casting issues.
+        # Drop any leftover enum from a prior failed migration, then recreate
+        # with the correct lowercase values that match our Python model.
+        conn.execute(sa.text("DROP TYPE IF EXISTS devicetype"))
         conn.execute(sa.text(
-            "DO $$ BEGIN "
-            "  CREATE TYPE devicetype AS ENUM ('desktop', 'mobile'); "
-            "EXCEPTION WHEN duplicate_object THEN NULL; "
-            "END $$"
+            "CREATE TYPE devicetype AS ENUM ('DESKTOP', 'MOBILE')"
         ))
         conn.execute(sa.text(
-            "ALTER TABLE nodes ADD COLUMN device_type devicetype DEFAULT 'desktop'::devicetype"
+            "ALTER TABLE nodes ADD COLUMN device_type devicetype DEFAULT 'DESKTOP'::devicetype"
         ))
 
 
