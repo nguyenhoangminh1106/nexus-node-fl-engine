@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexus.api.deps import get_current_node
 from nexus.core import orchestrator
-from nexus.core.conversion import get_or_create_onnx
+from nexus.core.conversion import get_or_create_coreml, get_or_create_onnx
 from nexus.db.models import (
     Checkpoint,
     Job,
@@ -188,5 +188,70 @@ async def get_model_onnx(
             "X-Round-Num": str(checkpoint.round_num),
             "X-Model-Type": job.model_type,
             "X-Num-Classes": str(job.num_classes),
+        },
+    )
+
+
+@router.get("/model/{job_id}/coreml")
+async def get_model_coreml(
+    job_id: uuid.UUID,
+    tier: int = 2,
+    node: Node = Depends(get_current_node),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download the current global model as an updatable Core ML model.
+
+    This model can be used for on-device training on iOS via Core ML's
+    MLUpdateTask API. The model has specific layers marked as updatable:
+
+      - tier=2 (default): only classifier/FC layer (transfer learning)
+      - tier=3: all layers (full training)
+
+    The Core ML file is cached in S3 per round+tier so conversion only
+    happens once.
+    """
+    # Verify node is assigned
+    result = await db.execute(
+        select(NodeAssignment).where(
+            NodeAssignment.job_id == job_id,
+            NodeAssignment.node_id == node.id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="Node not assigned to this job")
+
+    job = await db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Get latest checkpoint
+    result = await db.execute(
+        select(Checkpoint)
+        .where(Checkpoint.job_id == job_id)
+        .order_by(Checkpoint.round_num.desc())
+        .limit(1)
+    )
+    checkpoint = result.scalar_one_or_none()
+    if checkpoint is None:
+        raise HTTPException(status_code=404, detail="No checkpoint found")
+
+    coreml_bytes = get_or_create_coreml(
+        job_id=job_id,
+        round_num=checkpoint.round_num,
+        model_type=job.model_type,
+        num_classes=job.num_classes,
+        pytorch_checkpoint_path=checkpoint.path,
+        tier=tier,
+    )
+
+    return Response(
+        content=coreml_bytes,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename=model_round_{checkpoint.round_num}_tier{tier}.mlmodel",
+            "X-Round-Num": str(checkpoint.round_num),
+            "X-Model-Type": job.model_type,
+            "X-Num-Classes": str(job.num_classes),
+            "X-Tier": str(tier),
         },
     )

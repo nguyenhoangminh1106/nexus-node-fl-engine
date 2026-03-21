@@ -199,6 +199,28 @@ The ONNX file is cached server-side — conversion only happens once per round.
 5. **Convert weights back** → to PyTorch state_dict format
 6. **Submit** → `POST /nodes/task/{job}/submit` (same endpoint as desktop)
 
+### Download Core ML updatable model (iOS on-device training)
+
+For iOS apps that do on-device training via Core ML's `MLUpdateTask`, download a pre-built updatable Core ML model instead of ONNX:
+
+```bash
+# Tier 2: transfer learning (only classifier layer updatable)
+curl -H "X-API-Key: $NODE_KEY" \
+  -o model.mlmodel \
+  $SERVER_URL/api/v1/mobile/model/JOB_UUID/coreml?tier=2
+
+# Tier 3: full training (all layers updatable)
+curl -H "X-API-Key: $NODE_KEY" \
+  -o model.mlmodel \
+  $SERVER_URL/api/v1/mobile/model/JOB_UUID/coreml?tier=3
+```
+
+The Core ML model includes loss function (cross-entropy) and optimizer (SGD) config embedded, so the iOS app only needs to provide training data and call `MLUpdateTask`.
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `tier` | `2` | 2 = transfer learning (last layer), 3 = full training (all layers) |
+
 ---
 
 ## 5. Monitor Progress
@@ -321,6 +343,7 @@ GET  /api/v1/nodes/stats              → Node stats & reputation
 ```
 POST /api/v1/mobile/checkin            → Report conditions, get task if eligible
 GET  /api/v1/mobile/model/{job}/onnx   → Download model (ONNX binary)
+GET  /api/v1/mobile/model/{job}/coreml → Download updatable Core ML model (iOS training)
 POST /api/v1/nodes/task/{job}/submit   → Submit weights (same as desktop)
 ```
 
