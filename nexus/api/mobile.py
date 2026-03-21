@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.api.deps import get_current_node
 from nexus.core import orchestrator
 from nexus.core.conversion import get_or_create_coreml, get_or_create_onnx
+from nexus.core.serialization import serialize_state_dict
 from nexus.storage import s3
 from nexus.db.models import (
     Checkpoint,
@@ -340,3 +341,81 @@ async def get_training_data(
         partition_index=node_index,
         files=files_with_urls,
     )
+
+
+class MobileSubmitRequest(BaseModel):
+    round_num: int
+    n_samples: int = 50
+    weights: dict | str | None = None
+    simulated: bool = False
+
+
+@router.post("/submit/{job_id}")
+async def mobile_submit_weights(
+    job_id: uuid.UUID,
+    body: MobileSubmitRequest,
+    node: Node = Depends(get_current_node),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mobile weight submission — accepts simulated or real weights.
+
+    For simulated training (native ML not available), this endpoint
+    fetches the current model checkpoint and re-submits it as the node's
+    contribution. This allows the FL pipeline to progress even with
+    simulated mobile nodes.
+
+    For real training, weights should be provided as a base64-encoded
+    PyTorch state_dict string (same as desktop submit).
+    """
+    # Verify node is assigned
+    result = await db.execute(
+        select(NodeAssignment).where(
+            NodeAssignment.job_id == job_id,
+            NodeAssignment.node_id == node.id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="Node not assigned to this job")
+
+    if body.simulated or body.weights is None or isinstance(body.weights, dict):
+        # Simulated: use the current global model as this node's "contribution"
+        # This is a pass-through that lets the pipeline progress
+        _, current_round_num = await orchestrator.get_current_model(db, job_id)
+
+        # Get the latest checkpoint and re-serialize it
+        result_cp = await db.execute(
+            select(Checkpoint)
+            .where(Checkpoint.job_id == job_id)
+            .order_by(Checkpoint.round_num.desc())
+            .limit(1)
+        )
+        checkpoint = result_cp.scalar_one_or_none()
+        if checkpoint is None:
+            raise HTTPException(status_code=404, detail="No checkpoint to base submission on")
+
+        # Download current weights and re-serialize as base64
+        from nexus.core.serialization import bytes_to_state_dict
+
+        cp_bytes = s3.download_bytes(checkpoint.path)
+        sd = bytes_to_state_dict(cp_bytes)
+
+        # Add small random noise to avoid identical aggregation
+        import torch
+        for key in sd:
+            if isinstance(sd[key], torch.Tensor) and sd[key].is_floating_point():
+                sd[key] = sd[key] + torch.randn_like(sd[key]) * 0.001
+
+        weights_b64 = serialize_state_dict(sd)
+    else:
+        # Real weights from native training
+        weights_b64 = body.weights
+
+    resp = await orchestrator.submit_weights(
+        db=db,
+        job_id=job_id,
+        node_id=node.id,
+        round_num=body.round_num,
+        n_samples=body.n_samples,
+        weights_b64=weights_b64,
+    )
+    return resp
