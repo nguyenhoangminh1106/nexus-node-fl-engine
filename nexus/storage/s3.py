@@ -86,6 +86,29 @@ def delete_object(key: str) -> None:
     client.delete_object(Bucket=settings.s3_bucket, Key=key)
 
 
+def list_objects(prefix: str) -> list[dict]:
+    """List all objects under a prefix. Returns list of {key, size}."""
+    client = _get_client()
+    results = []
+    continuation_token = None
+
+    while True:
+        kwargs = {"Bucket": settings.s3_bucket, "Prefix": prefix}
+        if continuation_token:
+            kwargs["ContinuationToken"] = continuation_token
+
+        resp = client.list_objects_v2(**kwargs)
+
+        for obj in resp.get("Contents", []):
+            results.append({"key": obj["Key"], "size": obj["Size"]})
+
+        if not resp.get("IsTruncated"):
+            break
+        continuation_token = resp.get("NextContinuationToken")
+
+    return results
+
+
 def generate_presigned_url(key: str, expires_in: int = 3600) -> str:
     """Generate a presigned download URL using the public S3 endpoint.
 

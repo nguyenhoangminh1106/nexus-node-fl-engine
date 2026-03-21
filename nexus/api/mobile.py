@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nexus.api.deps import get_current_node
 from nexus.core import orchestrator
 from nexus.core.conversion import get_or_create_coreml, get_or_create_onnx
+from nexus.storage import s3
 from nexus.db.models import (
     Checkpoint,
     Job,
@@ -254,4 +255,88 @@ async def get_model_coreml(
             "X-Num-Classes": str(job.num_classes),
             "X-Tier": str(tier),
         },
+    )
+
+
+class DataPartitionResponse(BaseModel):
+    job_id: uuid.UUID
+    job_name: str
+    total_files: int
+    partition_size: int
+    partition_index: int
+    files: list[dict]
+
+
+@router.get("/data/{job_id}", response_model=DataPartitionResponse)
+async def get_training_data(
+    job_id: uuid.UUID,
+    node: Node = Depends(get_current_node),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get this node's partition of training data for a job.
+
+    The dataset is evenly partitioned across all assigned nodes. Each node
+    gets a unique subset so training covers the full dataset without overlap.
+
+    Returns presigned download URLs for each file in the partition.
+    """
+    # Verify node is assigned
+    result = await db.execute(
+        select(NodeAssignment).where(
+            NodeAssignment.job_id == job_id,
+            NodeAssignment.node_id == node.id,
+        )
+    )
+    assignment = result.scalar_one_or_none()
+    if assignment is None:
+        raise HTTPException(status_code=403, detail="Node not assigned to this job")
+
+    job = await db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not job.dataset_path:
+        raise HTTPException(status_code=404, detail="Job has no dataset configured")
+
+    # List all files in the dataset
+    all_files = s3.list_objects(job.dataset_path)
+    if not all_files:
+        raise HTTPException(status_code=404, detail="Dataset is empty")
+
+    # Get all assigned nodes to determine partition
+    result = await db.execute(
+        select(NodeAssignment).where(NodeAssignment.job_id == job_id)
+    )
+    all_assignments = result.scalars().all()
+    node_ids = sorted([str(a.node_id) for a in all_assignments])
+    node_index = node_ids.index(str(node.id)) if str(node.id) in node_ids else 0
+    total_nodes = len(node_ids)
+
+    # Partition files: node N gets every Nth file
+    partition = [f for i, f in enumerate(all_files) if i % total_nodes == node_index]
+
+    # Generate presigned URLs for each file
+    files_with_urls = []
+    for f in partition:
+        key = f["key"]
+        # Extract class label from path: datasets/{id}/{class}/{filename}
+        parts = key.split("/")
+        class_label = parts[-2] if len(parts) >= 3 else "unknown"
+        filename = parts[-1] if parts else key
+
+        files_with_urls.append({
+            "key": key,
+            "filename": filename,
+            "class_label": class_label,
+            "size": f["size"],
+            "url": s3.generate_presigned_url(key, expires_in=3600),
+        })
+
+    return DataPartitionResponse(
+        job_id=job.id,
+        job_name=job.name,
+        total_files=len(all_files),
+        partition_size=len(partition),
+        partition_index=node_index,
+        files=files_with_urls,
     )

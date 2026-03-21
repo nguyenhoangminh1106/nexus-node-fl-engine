@@ -344,6 +344,7 @@ GET  /api/v1/nodes/stats              → Node stats & reputation
 POST /api/v1/mobile/checkin            → Report conditions, get task if eligible
 GET  /api/v1/mobile/model/{job}/onnx   → Download model (ONNX binary)
 GET  /api/v1/mobile/model/{job}/coreml → Download updatable Core ML model (iOS training)
+GET  /api/v1/mobile/data/{job}         → Get training data partition (presigned URLs)
 POST /api/v1/nodes/task/{job}/submit   → Submit weights (same as desktop)
 ```
 
